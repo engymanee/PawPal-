@@ -34,8 +34,10 @@ classDiagram
         +Literal frequency
         +Optional~time~ preferred_time
         +Optional~date~ last_completed
+        +Optional~date~ due_date
+        +Optional~Task~ next_occurrence
         +Optional~Pet~ pet
-        +mark_complete() void
+        +mark_complete() Optional~Task~
         +is_due_today() bool
         +priority_score() int
     }
@@ -53,6 +55,10 @@ classDiagram
         +__init__(owner) void
         +generate_plan() DailyPlan
         +sort_tasks() List~Task~
+        +sort_by_time(tasks) List~Task~
+        +find_conflicts(tasks) List~str~
+        +filter_tasks(completed, pet_name) List~Task~
+        -_find_slot(task, windows, cursors) Optional~Tuple~
         +fits_in_time(task, remaining_minutes) bool
         +explain_choice(task) str
     }
@@ -63,9 +69,10 @@ classDiagram
         +List~Tuple~Task, time, str~~ scheduled_tasks
         +List~Tuple~Task, str~~ skipped_tasks
         +int total_minutes_used
+        +List~str~ warnings
         +add_scheduled(task, start, reason) void
         +add_skipped(task, reason) void
-        +get_reason(task) str
+        +get_reason(task) Optional~str~
         +complete_task(task) void
         +display() str
         +summary() str
@@ -78,7 +85,9 @@ classDiagram
     Pet "0..*" --> "0..1" Owner : owned by
     Scheduler --> Owner : uses
     Scheduler --> "0..1" DailyPlan : holds latest
-    Scheduler ..> Task : sorts / schedules
+    Scheduler ..> Task : sorts / filters / schedules
+    Task --> "0..1" Task : next occurrence
+    Task ..> Pet : mark_complete adds successor
     Scheduler ..> DailyPlan : creates
     DailyPlan --> Owner : planned for
     DailyPlan o-- "0..*" Task : scheduled / skipped

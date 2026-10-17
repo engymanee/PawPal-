@@ -8,6 +8,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from pawpal_system import (  # noqa: E402
     DailyPlan,
+    DependencyCycleError,
+    MustDoError,
     Owner,
     Pet,
     Scheduler,
@@ -518,3 +520,190 @@ def test_duplicate_time_warning_reaches_the_plan_without_crashing():
     assert len(plan.warnings) == 1
     starts = [start for _, start, _ in plan.scheduled_tasks]
     assert len(starts) == 2 and len(set(starts)) == 2  # both scheduled, at different times
+
+
+def test_next_slot_skips_busy_time_and_finds_gap():
+    owner = make_owner(minutes=300, windows=[TimeWindow(time(8, 0), time(12, 0))])
+    rex = make_pet()
+    owner.add_pet(rex)
+    rex.add_task(make_task("A", duration=60, preferred=time(8, 0)))
+    rex.add_task(make_task("B", duration=60, preferred=time(10, 0)))
+    s = Scheduler(owner)
+    assert s.find_next_available_slot(60) == time(9, 0)  # gap between A and B
+    assert s.find_next_available_slot(90) is None  # no gap that long: 9-10 and 11-12 are 60 each
+
+
+def test_next_slot_respects_earliest_and_window_end():
+    owner = make_owner(minutes=300, windows=[TimeWindow(time(8, 0), time(12, 0))])
+    rex = make_pet()
+    owner.add_pet(rex)
+    rex.add_task(make_task("A", duration=60, preferred=time(8, 0)))
+    s = Scheduler(owner)
+    assert s.find_next_available_slot(30, earliest=time(10, 0)) == time(10, 0)
+    assert s.find_next_available_slot(30, earliest=time(11, 45)) is None
+
+
+def test_next_slot_none_when_owner_out_of_minutes():
+    owner = make_owner(minutes=60)
+    rex = make_pet()
+    owner.add_pet(rex)
+    rex.add_task(make_task("A", duration=60, preferred=time(8, 0)))
+    assert Scheduler(owner).find_next_available_slot(15) is None
+
+
+def test_next_slot_rejects_nonpositive_duration():
+    with pytest.raises(ValueError):
+        Scheduler(make_owner()).find_next_available_slot(0)
+
+
+def test_sort_by_priority_then_time():
+    owner = make_owner()
+    rex = make_pet()
+    owner.add_pet(rex)
+    low_early = make_task("low_early", priority="low", preferred=time(7, 0))
+    high_late = make_task("high_late", priority="high", preferred=time(18, 0))
+    high_early = make_task("high_early", priority="high", preferred=time(9, 0))
+    med_none = make_task("med_none", priority="medium")
+    for t in (low_early, high_late, med_none, high_early):
+        rex.add_task(t)
+
+    titles = [t.title for t in Scheduler(owner).sort_by_priority()]
+
+    assert titles == ["high_early", "high_late", "med_none", "low_early"]
+
+
+def test_sort_by_priority_accepts_a_subset_without_changing_it():
+    owner = make_owner()
+    a, b = make_task("a", priority="low"), make_task("b", priority="high")
+    subset = [a, b]
+    assert Scheduler(owner).sort_by_priority(subset) == [b, a]
+    assert subset == [a, b]
+
+
+# ---- optimal_plan: constraint-based planning ----
+
+def opt_task(title, category="walk", duration=30, priority="medium", preferred=None, depends_on=None, gap=None):
+    t = Task(title, category, duration, priority, "daily", preferred_time=preferred)
+    t.depends_on = depends_on or []
+    t.min_gap_minutes = gap
+    return t
+
+
+def opt_setup(tasks, windows, minutes=600):
+    owner = Owner("Sam", minutes, time_windows=windows)
+    pet = make_pet()
+    owner.add_pet(pet)
+    for t in tasks:
+        pet.add_task(t)
+    return owner, Scheduler(owner)
+
+
+def test_optimal_beats_greedy_when_greedy_takes_one_big_high_priority_task():
+    walks = [opt_task(f"Walk {i}", duration=20, priority="medium") for i in range(3)]
+    grooming = opt_task("Grooming", category="grooming", duration=60, priority="high")
+    owner, sched = opt_setup([grooming] + walks, [TimeWindow(time(8, 0), time(9, 0))], minutes=60)
+
+    greedy = sched.generate_plan()
+    optimal = sched.optimal_plan()
+
+    assert [t.title for t, _, _ in greedy.scheduled_tasks] == ["Grooming"]
+    assert sched.plan_score(greedy) == 10
+    assert sched.plan_score(optimal) == 15
+    assert {t.title for t, _, _ in optimal.scheduled_tasks} == {"Walk 0", "Walk 1", "Walk 2"}
+    reason = optimal.get_reason(grooming)
+    assert "Skipped" in reason and "15" in reason  # names the scores that beat it
+
+
+def test_optimal_never_scores_below_greedy_without_extra_constraints():
+    owner, sched = opt_setup(
+        [
+            opt_task("A", duration=45, priority="high", preferred=time(8, 0)),
+            opt_task("B", duration=30, priority="medium", preferred=time(8, 30)),
+            opt_task("C", duration=30, priority="medium"),
+            opt_task("D", duration=15, priority="low", preferred=time(9, 0)),
+        ],
+        [TimeWindow(time(8, 0), time(10, 0))],
+        minutes=100,
+    )
+    assert sched.plan_score(sched.optimal_plan()) >= sched.plan_score(sched.generate_plan())
+
+
+def test_dependency_cycle_raises_with_the_path():
+    owner, sched = opt_setup(
+        [opt_task("A", depends_on=["B"]), opt_task("B", depends_on=["A"])],
+        [TimeWindow(time(8, 0), time(12, 0))],
+    )
+    with pytest.raises(DependencyCycleError, match="->") as err:
+        sched.optimal_plan()
+    assert "A" in str(err.value) and "B" in str(err.value)
+
+
+def test_order_by_dependencies_puts_prerequisites_first_and_rejects_unknown_titles():
+    meds = opt_task("Meds", category="meds", depends_on=["Feed"])
+    feed = opt_task("Feed", category="feeding")
+    owner, sched = opt_setup([meds, feed], [TimeWindow(time(8, 0), time(12, 0))])
+    assert [t.title for t in sched.order_by_dependencies()] == ["Feed", "Meds"]
+    meds.depends_on = ["Nope"]
+    with pytest.raises(ValueError, match="Nope"):
+        sched.order_by_dependencies()
+
+
+def test_dependency_moves_a_task_and_explains_why():
+    feed = opt_task("Feed", category="feeding", duration=30, preferred=time(8, 0))
+    meds = opt_task("Meds", category="meds", duration=10, priority="high", preferred=time(8, 0), depends_on=["Feed"])
+    owner, sched = opt_setup([meds, feed], [TimeWindow(time(8, 0), time(10, 0))])
+
+    plan = sched.optimal_plan()
+    starts = {t.title: start for t, start, _ in plan.scheduled_tasks}
+
+    assert starts["Feed"] == time(8, 0)
+    assert starts["Meds"] >= time(8, 30)
+    assert "because it must come after 'Feed'" in plan.get_reason(meds)
+
+
+def test_task_is_skipped_when_its_dependency_is_skipped():
+    big = opt_task("Big", duration=200, priority="low")
+    after = opt_task("After", depends_on=["Big"], priority="high")
+    owner, sched = opt_setup([big, after], [TimeWindow(time(8, 0), time(9, 0))], minutes=60)
+    plan = sched.optimal_plan()
+    assert plan.scheduled_tasks == []
+    assert "depends on 'Big'" in plan.get_reason(after)
+
+
+def test_meds_keep_the_minimum_gap():
+    morning = opt_task("Meds AM", category="meds", duration=10, priority="high", preferred=time(7, 0), gap=480)
+    evening = opt_task("Meds PM", category="meds", duration=10, priority="high", preferred=time(8, 0), gap=480)
+    owner, sched = opt_setup(
+        [morning, evening],
+        [TimeWindow(time(7, 0), time(10, 0)), TimeWindow(time(15, 0), time(20, 0))],
+        minutes=120,
+    )
+    plan = sched.optimal_plan()
+    starts = sorted(60 * s.hour + s.minute for _, s, _ in plan.scheduled_tasks)
+    assert len(starts) == 2
+    assert starts[1] - (starts[0] + 10) >= 480
+
+
+def test_must_do_that_cannot_fit_gives_a_clear_error():
+    meds = opt_task("Insulin", category="meds", duration=90, priority="high")
+    owner, sched = opt_setup([meds], [TimeWindow(time(8, 0), time(9, 0))])
+    with pytest.raises(MustDoError, match="90 min"):
+        sched.optimal_plan()
+
+
+def test_must_do_is_kept_even_when_it_scores_less_than_other_tasks():
+    meds = opt_task("Insulin", category="meds", duration=30, priority="high")
+    walks = [opt_task(f"Walk {i}", duration=30, priority="high") for i in range(2)]
+    owner, sched = opt_setup([meds] + walks, [TimeWindow(time(8, 0), time(9, 0))], minutes=60)
+    titles = {t.title for t, _, _ in sched.optimal_plan().scheduled_tasks}
+    assert "Insulin" in titles and len(titles) == 2
+
+
+def test_empty_task_list_and_zero_free_time_give_empty_plans():
+    owner, sched = opt_setup([], [TimeWindow(time(8, 0), time(9, 0))])
+    assert sched.optimal_plan().scheduled_tasks == []
+
+    walk = opt_task("Walk")
+    owner, sched = opt_setup([walk], [TimeWindow(time(8, 0), time(9, 0))], minutes=0)
+    plan = sched.optimal_plan()
+    assert plan.scheduled_tasks == [] and len(plan.skipped_tasks) == 1

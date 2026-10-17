@@ -1,0 +1,140 @@
+classDiagram
+    class helpers {
+        <<module pawpal_system>>
+        +Dict~str, int~ PRIORITY_SCORES
+        +Tuple~time, time~ DEFAULT_WINDOW
+        +Dict~str, int~ VALUE_POINTS
+        +int STEP_MINUTES
+        +int PENALTY_PER_STEP
+        +int SEARCH_NODE_LIMIT
+        +int EXPLAIN_NODE_LIMIT
+        -_to_minutes(t: time) int
+        -_to_time(minutes: int) time
+        -_clock(minutes: int) str
+        -_conflict_message(first: Tuple, second: Tuple) str
+    }
+
+    class DependencyCycleError {
+        <<ValueError>>
+    }
+
+    class MustDoError {
+        <<ValueError>>
+    }
+
+    class TimeWindow {
+        <<dataclass>>
+        +time start
+        +time end
+        +duration_minutes() int
+        +contains(t: time) bool
+    }
+
+    class Task {
+        <<dataclass>>
+        +str title
+        +Literal category
+        +int duration_minutes
+        +Literal priority
+        +Literal frequency
+        +Optional~time~ preferred_time
+        +Optional~date~ last_completed
+        +Optional~date~ due_date
+        +List~str~ depends_on
+        +Optional~int~ min_gap_minutes
+        +Optional~Task~ next_occurrence
+        +Optional~Pet~ pet
+        +mark_complete() Optional~Task~
+        +is_due_today() bool
+        +is_must_do() bool
+        +priority_score() int
+    }
+
+    class Pet {
+        <<dataclass>>
+        +str name
+        +str species
+        +str breed
+        +int age
+        +str special_needs
+        +List~Task~ tasks
+        +Optional~Owner~ owner
+        +add_task(task: Task) None
+        +remove_task(task: Task) None
+        +edit_task(task: Task, **changes) None
+        +get_tasks() List~Task~
+    }
+
+    class Owner {
+        <<dataclass>>
+        +str name
+        +int available_minutes
+        +List~TimeWindow~ time_windows
+        +Dict preferences
+        +List~Pet~ pets
+        +add_pet(pet: Pet) None
+        +remove_pet(pet: Pet) None
+        +set_availability(minutes: int, windows: List~TimeWindow~) None
+        +set_preference(key: str, value) None
+        +get_all_tasks() List~Task~
+    }
+
+    class DailyPlan {
+        <<dataclass>>
+        +Owner owner
+        +date plan_date
+        +List~Tuple~Task, time, str~~ scheduled_tasks
+        +List~Tuple~Task, str~~ skipped_tasks
+        +int total_minutes_used
+        +List~str~ warnings
+        +add_scheduled(task: Task, start: time, reason: str) None
+        +add_skipped(task: Task, reason: str) None
+        +get_reason(task: Task) Optional~str~
+        +complete_task(task: Task) None
+        +display() str
+        +summary() str
+    }
+
+    class Scheduler {
+        +Owner owner
+        +Optional~DailyPlan~ plan
+        +__init__(owner: Owner)
+        +generate_plan() DailyPlan
+        +optimal_plan() DailyPlan
+        +order_by_dependencies(tasks: Optional~List~Task~~) List~Task~
+        +plan_score(plan: DailyPlan) int
+        +find_next_available_slot(duration_minutes: int, earliest: Optional~time~) Optional~time~
+        +sort_tasks() List~Task~
+        +sort_by_priority(tasks: Optional~List~Task~~) List~Task~
+        +sort_by_time(tasks: Optional~List~Task~~) List~Task~
+        +find_conflicts(tasks: Optional~List~Task~~) List~str~
+        +filter_tasks(completed: Optional~bool~, pet_name: Optional~str~) List~Task~
+        +fits_in_time(task: Task, remaining_minutes: int) bool
+        +explain_choice(task: Task) str
+        -_find_slot(task: Task, windows: List~TimeWindow~, cursors: List~int~) Optional~Tuple~int, int, bool~~
+        -_not_due_reason(task: Task) str
+        -_penalty(task: Task, start: int) int
+        -_solve(due: List~Task~, windows: List~TimeWindow~, required: set, node_limit: int) Optional~Tuple~
+        -_optimal_reason(task: Task, start: int, placed_at: Dict) str
+        -_must_do_failure(due: List~Task~, windows: List~TimeWindow~) str
+    }
+
+    Owner "1" o-- "0..*" Pet : owns
+    Owner "1" *-- "0..*" TimeWindow : available during
+    Pet "1" *-- "0..*" Task : has
+    Pet "0..*" --> "0..1" Owner : owned by
+    Task "0..*" --> "0..1" Pet : belongs to
+    Task "0..1" --> "0..1" Task : next occurrence
+    Task ..> Pet : mark_complete adds successor
+    DailyPlan --> Owner : planned for
+    DailyPlan o-- "0..*" Task : scheduled / skipped
+    DailyPlan ..> Task : complete_task calls mark_complete
+    Scheduler --> Owner : uses
+    Scheduler --> "0..1" DailyPlan : holds latest
+    Scheduler ..> DailyPlan : creates
+    Scheduler ..> Task : sorts / filters / schedules
+    Scheduler ..> TimeWindow : places tasks in
+    Scheduler ..> DependencyCycleError : raises
+    Scheduler ..> MustDoError : raises
+    Task "0..*" ..> "0..*" Task : depends on (by title)
+    Scheduler ..> helpers : uses time conversion and conflict message

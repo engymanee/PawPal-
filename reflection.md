@@ -82,12 +82,18 @@ Yes, I did
 **a. What you tested**
 
 - What behaviors did you test?
+  I tested sorting by time and by priority, recurring tasks (a daily task comes back tomorrow, a weekly one in 7 days, and only one copy is ever made), conflict warnings, and plan generation, including the reasons a task is skipped.
+
 - Why were these tests important?
+  These are the parts the app's promises depend on. If sorting or conflict detection is wrong, the schedule is wrong, and the plan has to explain itself correctly too.
 
 **b. Confidence**
 
 - How confident are you that your scheduler works correctly?
+  Four out of five. All 43 tests pass and they cover the main behaviors. Gave four cos I know I ahven't tested edge cases.
+
 - What edge cases would you test next if you had more time?
+  Overlapping time windows, tasks that cross midnight, tasks with zero minutes, and an owner with no available time.
 
 ---
 
@@ -96,11 +102,14 @@ Yes, I did
 **a. What went well**
 
 - What part of this project are you most satisfied with?
+  The scheduler. Sorting, filtering, conflict warnings and recurring tasks all work together, and every task in the plan comes with a reason. The AI helped most when I gave it small, clear jobs: turning my UML into a class skeleton, filling in one method at a time, and drafting tests and docs that I then checked.
 
 **b. What you would improve**
 
 - If you had another iteration, what would you improve or redesign?
+  I would handle overlapping time windows and tasks that cross midnight, and I would use the owner's preferences, which are saved but not used yet. I would also fix the plan's reason text. It says "preferred time not available" even when a task only starts a little later in the same window.
 
 **c. Key takeaway**
 
 - What is one important thing you learned about designing systems or working with AI on this project?
+  The AI writes code fast, but I have to be the lead architect. I decide what the classes are and what the scheduler promises, and I check the AI's work against my UML. When I changed or rejected a suggestion, like renaming the `date` field to `plan_date`, the design stayed clean. Working in small steps also  made each step easy to review. Overall I think that understanding the clear logic of what I solution is meant to do is more important since AI can help with most of the code... and you can direct it.

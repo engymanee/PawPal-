@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import heapq
 from dataclasses import dataclass, field
 from datetime import date, time, timedelta
 from itertools import islice
@@ -10,6 +11,23 @@ PRIORITY_SCORES = {"low": 1, "medium": 2, "high": 3}
 
 # Used when the owner has not set any time windows.
 DEFAULT_WINDOW = (time(8, 0), time(20, 0))
+
+# optimal_plan(): points per priority, and the cost of moving a task off its preferred time.
+VALUE_POINTS = {"low": 2, "medium": 5, "high": 10}
+STEP_MINUTES = 15
+PENALTY_PER_STEP = 1
+# Upper limit on search nodes, so a large task list cannot hang the planner.
+SEARCH_NODE_LIMIT = 50_000
+# Smaller limit for each "why was this skipped" search.
+EXPLAIN_NODE_LIMIT = 5_000
+
+
+class DependencyCycleError(ValueError):
+    """Raised when tasks depend on each other in a loop (A before B before A)."""
+
+
+class MustDoError(ValueError):
+    """Raised when a must-do task (high-priority meds) cannot be scheduled."""
 
 
 def _to_minutes(t: time) -> int:
@@ -81,6 +99,10 @@ class Task:
     last_completed: Optional[date] = None
     # Set on auto-created recurring instances: the task is not due before this date.
     due_date: Optional[date] = None
+    # Titles of this pet's tasks that must be scheduled earlier in the day (used by optimal_plan).
+    depends_on: List[str] = field(default_factory=list)
+    # Minimum minutes between this task and another task of the same pet and category.
+    min_gap_minutes: Optional[int] = None
     # The recurring instance created when this task was completed; excluded from repr/eq.
     next_occurrence: Optional[Task] = field(default=None, repr=False, compare=False)
     # Back-reference set by Pet.add_task; excluded from repr/eq to avoid cycles.
@@ -116,6 +138,8 @@ class Task:
             frequency=self.frequency,
             preferred_time=self.preferred_time,
             due_date=today + timedelta(days=days),
+            depends_on=list(self.depends_on),
+            min_gap_minutes=self.min_gap_minutes,
         )
         self.pet.add_task(successor)
         self.next_occurrence = successor
@@ -141,6 +165,10 @@ class Task:
         if self.frequency == "daily":
             return days_since >= 1
         return days_since >= 7  # weekly
+
+    def is_must_do(self) -> bool:
+        """Return True for high-priority meds, which optimal_plan() never skips."""
+        return self.category == "meds" and self.priority == "high"
 
     def priority_score(self) -> int:
         """Return a numeric score for this task's priority (higher = more urgent)."""
@@ -343,13 +371,7 @@ class Scheduler:
         for task in self.sort_tasks():
             # Skip tasks that are not due today
             if not task.is_due_today():
-                if task.due_date is not None and task.due_date > date.today():
-                    reason = f"Not due until {task.due_date.isoformat()} ({task.frequency} task)"
-                elif task.last_completed is None:
-                    reason = f"Not due today ({task.frequency} task)"
-                else:
-                    reason = f"Not due today ({task.frequency} task, done {task.last_completed})"
-                plan.add_skipped(task, reason)
+                plan.add_skipped(task, self._not_due_reason(task))
                 continue
 
             # Skip tasks that don't fit in the owner's remaining minutes
@@ -380,6 +402,15 @@ class Scheduler:
         self.plan = plan
         return plan
 
+    @staticmethod
+    def _not_due_reason(task: Task) -> str:
+        """Return why a task that is not due today is left out of the plan."""
+        if task.due_date is not None and task.due_date > date.today():
+            return f"Not due until {task.due_date.isoformat()} ({task.frequency} task)"
+        if task.last_completed is None:
+            return f"Not due today ({task.frequency} task)"
+        return f"Not due today ({task.frequency} task, done {task.last_completed})"
+
     def _find_slot(self, task: Task, windows: List[TimeWindow], cursors: List[int]):
         """Return (window index, start minute, used_preferred) for the task, or None if nothing fits."""
         # IMPLEMENT: try the preferred time first, then fall back to the earliest window with room
@@ -399,13 +430,29 @@ class Scheduler:
 
     def sort_tasks(self) -> List[Task]:
         """Return the owner's tasks ordered by scheduling priority."""
-        # IMPLEMENT: highest priority first, then earliest preferred time (none last), then shortest
+        return self.sort_by_priority()
+
+    def sort_by_priority(self, tasks: Optional[List[Task]] = None) -> List[Task]:
+        """Return tasks ordered by priority first, then by time.
+
+        Order: highest priority first, then earliest preferred time (none last), then shortest
+        duration. The input list is not changed.
+
+        Args:
+            tasks: The tasks to sort. Defaults to all of the owner's tasks.
+
+        Returns:
+            A new sorted list of tasks.
+        """
+        if tasks is None:
+            tasks = self.owner.get_all_tasks()
+
         def sort_key(task: Task):
             has_time = task.preferred_time is not None
             minutes = _to_minutes(task.preferred_time) if has_time else 0
             return (-task.priority_score(), not has_time, minutes, task.duration_minutes)
 
-        return sorted(self.owner.get_all_tasks(), key=sort_key)
+        return sorted(tasks, key=sort_key)
 
     def sort_by_time(self, tasks: Optional[List[Task]] = None) -> List[Task]:
         """Return tasks ordered by preferred time, earliest first.
@@ -489,6 +536,313 @@ class Scheduler:
         if pet_name is not None:
             tasks = [t for t in tasks if t.pet and t.pet.name.lower() == pet_name.strip().lower()]
         return tasks
+
+    def find_next_available_slot(
+        self, duration_minutes: int, earliest: Optional[time] = None
+    ) -> Optional[time]:
+        """Return the start time of the first free gap that can hold a new task.
+
+        The gaps are the parts of the owner's time windows not taken by tasks in today's plan.
+        A gap must be at least duration_minutes long and start at or after earliest. The slot
+        is also refused when the owner has fewer minutes left today than the task needs. The
+        plan is generated first if there is none yet.
+
+        Args:
+            duration_minutes: Length of the task to place.
+            earliest: Do not start before this time. Defaults to the start of the first window.
+
+        Returns:
+            The start time of the first gap that fits, or None if there isn't one.
+        """
+        if duration_minutes <= 0:
+            raise ValueError("duration must be positive")
+        plan = self.plan if self.plan is not None else self.generate_plan()
+        if duration_minutes > self.owner.available_minutes - plan.total_minutes_used:
+            return None
+
+        # Busy spans from the plan, earliest first; windows default like generate_plan
+        busy = sorted(
+            (_to_minutes(start), _to_minutes(start) + t.duration_minutes)
+            for t, start, _reason in plan.scheduled_tasks
+        )
+        windows = sorted(self.owner.time_windows or [TimeWindow(*DEFAULT_WINDOW)], key=lambda w: w.start)
+        floor = _to_minutes(earliest) if earliest is not None else 0
+
+        for w in windows:
+            cursor = max(_to_minutes(w.start), floor)
+            end = _to_minutes(w.end)
+            for b_start, b_end in busy:
+                if b_end <= cursor:
+                    continue  # already behind the cursor
+                if b_start >= end:
+                    break  # past this window
+                if b_start - cursor >= duration_minutes:
+                    return _to_time(cursor)
+                cursor = max(cursor, b_end)
+            if cursor + duration_minutes <= end:
+                return _to_time(cursor)
+        return None
+
+    def order_by_dependencies(self, tasks: Optional[List[Task]] = None) -> List[Task]:
+        """Return tasks ordered so every task comes after the tasks it depends on.
+
+        Uses Kahn's algorithm. A task's depends_on holds titles of the same pet's tasks. Tasks
+        with no ordering between them keep their scheduling-priority order.
+
+        Args:
+            tasks: The tasks to order. Defaults to the owner's tasks that have no next occurrence.
+
+        Returns:
+            A new list in dependency order.
+
+        Raises:
+            DependencyCycleError: if the dependencies loop, with the path (e.g. "A -> B -> A").
+            ValueError: if a task depends on a title that is not among the tasks.
+        """
+        if tasks is None:
+            tasks = [t for t in self.sort_tasks() if t.next_occurrence is None]
+        position = {id(t): i for i, t in enumerate(tasks)}
+        predecessors: Dict[int, List[Task]] = {id(t): [] for t in tasks}
+        successors: Dict[int, List[Task]] = {id(t): [] for t in tasks}
+        for task in tasks:
+            for title in task.depends_on:
+                found = [d for d in tasks if d.pet is task.pet and d.title == title]
+                if not found:
+                    raise ValueError(f"{task.title!r} depends on unknown task {title!r}")
+                for dep in found:
+                    predecessors[id(task)].append(dep)
+                    successors[id(dep)].append(task)
+
+        waiting = {id(t): len(predecessors[id(t)]) for t in tasks}
+        ready = [position[id(t)] for t in tasks if waiting[id(t)] == 0]
+        heapq.heapify(ready)
+        ordered: List[Task] = []
+        while ready:
+            task = tasks[heapq.heappop(ready)]
+            ordered.append(task)
+            for nxt in successors[id(task)]:
+                waiting[id(nxt)] -= 1
+                if waiting[id(nxt)] == 0:
+                    heapq.heappush(ready, position[id(nxt)])
+
+        if len(ordered) < len(tasks):
+            stuck = {id(t) for t in tasks if waiting[id(t)] > 0}
+            # Every stuck task has a stuck predecessor, so walking back must revisit one
+            walk, seen = [], {}
+            node = next(t for t in tasks if id(t) in stuck)
+            while id(node) not in seen:
+                seen[id(node)] = len(walk)
+                walk.append(node)
+                node = next(d for d in predecessors[id(node)] if id(d) in stuck)
+            loop = list(reversed(walk[seen[id(node)]:]))  # prerequisite first
+            names = [t.title for t in loop] + [loop[0].title]
+            raise DependencyCycleError("Dependency cycle: " + " -> ".join(names))
+        return ordered
+
+    @staticmethod
+    def _penalty(task: Task, start: int) -> int:
+        """Points lost for moving a task away from its preferred time, per 15 minutes."""
+        if task.preferred_time is None:
+            return 0
+        moved = abs(start - _to_minutes(task.preferred_time))
+        return -(-moved // STEP_MINUTES) * PENALTY_PER_STEP
+
+    def plan_score(self, plan: DailyPlan) -> int:
+        """Return a plan's total points: priority values minus preferred-time penalties."""
+        return sum(
+            VALUE_POINTS[t.priority] - self._penalty(t, _to_minutes(start))
+            for t, start, _reason in plan.scheduled_tasks
+        )
+
+    def optimal_plan(self) -> DailyPlan:
+        """Build the highest-scoring DailyPlan that satisfies every constraint.
+
+        Each due task is either skipped or placed at a start time inside a time window. A plan
+        scores VALUE_POINTS for each placed task minus PENALTY_PER_STEP for every 15 minutes it
+        sits away from its preferred time. A plan must also respect the owner's available
+        minutes, no overlaps, dependencies (a task starts after the tasks it depends on end),
+        minimum gaps (min_gap_minutes between tasks of the same pet and category, end to start),
+        and must-do tasks (high-priority meds are never skipped).
+
+        The search is depth-first over tasks in dependency order, and a branch is dropped once
+        its score plus every remaining task's value cannot beat the best plan found. It stops
+        after SEARCH_NODE_LIMIT nodes and adds a warning if so. The result is stored in
+        self.plan. Every skipped task gets a reason with the score of the best plan that
+        includes it.
+
+        Returns:
+            The optimal DailyPlan. It is empty when nothing is due or there is no free time.
+
+        Raises:
+            DependencyCycleError: if task dependencies loop.
+            MustDoError: if a must-do task cannot be scheduled, with the reason.
+        """
+        plan = DailyPlan(owner=self.owner, plan_date=date.today())
+        all_tasks = self.sort_tasks()
+        active = [t for t in all_tasks if t.next_occurrence is None]
+        ordered = self.order_by_dependencies(active)
+        for task in all_tasks:
+            if task.next_occurrence is not None:
+                plan.add_skipped(task, self._not_due_reason(task))
+        due = []
+        for task in ordered:
+            if task.is_due_today():
+                due.append(task)
+            else:
+                plan.add_skipped(task, self._not_due_reason(task))
+
+        windows = sorted(self.owner.time_windows or [TimeWindow(*DEFAULT_WINDOW)], key=lambda w: w.start)
+        must = {id(t) for t in due if t.is_must_do()}
+        solved = self._solve(due, windows, must)
+        if solved is None:
+            raise MustDoError(self._must_do_failure(due, windows))
+        best, placement, truncated = solved
+        if truncated:
+            plan.warnings.append(f"Search stopped after {SEARCH_NODE_LIMIT} steps; the plan may not be optimal")
+
+        placed_at = {id(t): start for t, start, _end in placement}
+        for task, start, _end in sorted(placement, key=lambda p: p[1]):
+            plan.add_scheduled(task, _to_time(start), self._optimal_reason(task, start, placed_at))
+        for task in due:
+            if id(task) in placed_at:
+                continue
+            missing = [d for d in task.depends_on if not any(
+                id(p) in placed_at for p in due if p.pet is task.pet and p.title == d)]
+            if missing:
+                plan.add_skipped(task, f"Skipped: it depends on {missing[0]!r}, which is not in the plan")
+                continue
+            with_it = self._solve(due, windows, must | {id(task)}, EXPLAIN_NODE_LIMIT)
+            if with_it is None:
+                reason = "Skipped: no valid plan can include it (time, windows, spacing or dependencies)"
+            elif with_it[0] == best:
+                reason = f"Skipped: plans that include it score no higher ({best} points)"
+            else:
+                found = "best plan found" if with_it[2] else "best plan"
+                reason = (f"Skipped: the {found} with it scores {with_it[0]} points, "
+                          f"against {best} for the chosen plan")
+            plan.add_skipped(task, reason)
+        self.plan = plan
+        return plan
+
+    def _optimal_reason(self, task: Task, start: int, placed_at: Dict[int, int]) -> str:
+        """Explain a scheduled task's score and why it sits at its start time."""
+        reason = f"{task.priority.capitalize()} priority (+{VALUE_POINTS[task.priority]} pts)"
+        if task.preferred_time is not None:
+            penalty = self._penalty(task, start)
+            if penalty == 0:
+                reason += f", at preferred time {task.preferred_time.strftime('%H:%M')}"
+            else:
+                reason += f", moved to {_clock(start)} from {task.preferred_time.strftime('%H:%M')} (-{penalty} pts)"
+                if task.depends_on:
+                    reason += f" because it must come after {', '.join(repr(d) for d in task.depends_on)}"
+        return reason
+
+    def _solve(self, due: List[Task], windows: List[TimeWindow], required: set, node_limit: int = SEARCH_NODE_LIMIT):
+        """Search for the best-scoring set of placements for the due tasks.
+
+        Args:
+            due: Due tasks in dependency order.
+            windows: The owner's time windows, earliest first.
+            required: ids of tasks that may not be skipped.
+            node_limit: Stop searching after this many nodes.
+
+        Returns:
+            (score, [(task, start, end), ...], truncated) for the best plan, or None if no plan
+            places every required task.
+        """
+        budget = self.owner.available_minutes
+        spans = [(_to_minutes(w.start), _to_minutes(w.end)) for w in windows]
+        preds = {
+            id(t): [d for d in due if d.pet is t.pet and d.title in t.depends_on] for t in due
+        }
+        remaining_value = [0] * (len(due) + 1)
+        for i in range(len(due) - 1, -1, -1):
+            remaining_value[i] = remaining_value[i + 1] + VALUE_POINTS[due[i].priority]
+
+        best_score = float("-inf")
+        best_placed: Optional[list] = None
+        nodes = 0
+        truncated = False
+        placed: List[Tuple[Task, int, int]] = []
+        ends: Dict[int, Tuple[int, int]] = {}
+
+        def gap_ok(task: Task, start: int, end: int) -> bool:
+            for other, o_start, o_end in placed:
+                if o_start < end and start < o_end:
+                    return False  # overlap
+                if other.pet is task.pet and other.category == task.category:
+                    gap = max(task.min_gap_minutes or 0, other.min_gap_minutes or 0)
+                    if gap and not (start >= o_end + gap or end + gap <= o_start):
+                        return False
+            return True
+
+        def starts_for(task: Task) -> List[int]:
+            candidates = set()
+            for w_start, w_end in spans:
+                candidates.update(range(w_start, w_end, STEP_MINUTES))
+                candidates.add(w_start)
+                if task.preferred_time is not None:
+                    candidates.add(_to_minutes(task.preferred_time))
+            for other, o_start, o_end in placed:
+                candidates.add(o_end)
+                if other.pet is task.pet and other.category == task.category:
+                    gap = max(task.min_gap_minutes or 0, other.min_gap_minutes or 0)
+                    candidates.update((o_end + gap, o_start - gap - task.duration_minutes))
+            return sorted(candidates, key=lambda c: (self._penalty(task, c), c))
+
+        def search(i: int, used: int, score: int) -> None:
+            nonlocal best_score, best_placed, nodes, truncated
+            nodes += 1
+            if nodes > node_limit:
+                truncated = True
+                return
+            if i == len(due):
+                if score > best_score:
+                    best_score, best_placed = score, list(placed)
+                return
+            if score + remaining_value[i] <= best_score:
+                return  # even placing everything left cannot beat the best plan
+            task = due[i]
+            duration = task.duration_minutes
+            if used + duration <= budget and all(id(d) in ends for d in preds[id(task)]):
+                after = max((ends[id(d)][1] for d in preds[id(task)]), default=0)
+                for start in starts_for(task):
+                    end = start + duration
+                    if start < after or not any(ws <= start and end <= we for ws, we in spans):
+                        continue
+                    if not gap_ok(task, start, end):
+                        continue
+                    placed.append((task, start, end))
+                    ends[id(task)] = (start, end)
+                    search(i + 1, used + duration, score + VALUE_POINTS[task.priority] - self._penalty(task, start))
+                    del ends[id(task)]
+                    placed.pop()
+            if id(task) not in required:
+                search(i + 1, used, score)
+
+        search(0, 0, 0)
+        if best_placed is None:
+            return None
+        return best_score, best_placed, truncated
+
+    def _must_do_failure(self, due: List[Task], windows: List[TimeWindow]) -> str:
+        """Explain why the must-do tasks cannot all be scheduled."""
+        must = [t for t in due if t.is_must_do()]
+        longest = max((w.duration_minutes() for w in windows), default=0)
+        reasons = []
+        for task in must:
+            owner_s = ""
+            if task.pet:
+                owner_s = f"{task.pet.name}' " if task.pet.name.endswith("s") else f"{task.pet.name}'s "
+            name = f"{owner_s}{task.title!r}"
+            if task.duration_minutes > self.owner.available_minutes:
+                reasons.append(f"{name} needs {task.duration_minutes} min but only {self.owner.available_minutes} are available")
+            elif task.duration_minutes > longest:
+                reasons.append(f"{name} needs {task.duration_minutes} min but the longest time window is {longest} min")
+        if not reasons:
+            names = ", ".join(repr(t.title) for t in must)
+            reasons.append(f"the must-do tasks ({names}) cannot all be placed without overlapping or breaking a spacing or dependency rule")
+        return "Cannot schedule must-do meds: " + "; ".join(reasons)
 
     def fits_in_time(self, task: Task, remaining_minutes: int) -> bool:
         """Return True if the task fits in the remaining minutes."""
