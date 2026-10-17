@@ -50,7 +50,10 @@ Yes, I did
 **b. Tradeoffs**
 
 - Describe one tradeoff your scheduler makes.
+  My scheduler is greedy. `generate_plan()` sorts the tasks once (highest priority first, then earliest preferred time, then shortest) and places them in that order. Each task goes at its preferred time if it fits, or in the earliest free slot if not, and a task that doesn't fit is skipped. It never goes back to rearrange earlier choices. This means it can be less than optimal. For example, a long high-priority task can use up minutes that would have fit several shorter tasks, and two tasks that ask for the same time are not negotiated: one is moved, and I only report the overlap as a warning from `find_conflicts()`.
+
 - Why is that tradeoff reasonable for this scenario?
+  A pet owner has a short list of tasks, and the most important ones, like medication and feeding, must happen even if the day is full. Putting high priority first guarantees that, which matters more than packing in as many tasks as possible. A greedy pass is also easy to explain, and the app's main promise is showing why each task was scheduled or skipped. Because the rules are simple, every reason can be one clear sentence, such as "High priority" or "preferred time not available so used the earliest free slot". A smarter search could fit more tasks in, but it would be harder to understand and to test, and for a handful of tasks the extra complexity isn't worth it.
 
 ---
 

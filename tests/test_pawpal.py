@@ -60,6 +60,61 @@ def test_is_due_today_rules():
     assert w.is_due_today()
 
 
+@pytest.mark.parametrize("frequency, days", [("daily", 1), ("weekly", 7)])
+def test_mark_complete_creates_next_occurrence(frequency, days):
+    pet = make_pet()
+    task = make_task("Walk", "high", 30, frequency, preferred=time(8))
+    pet.add_task(task)
+
+    nxt = task.mark_complete()
+
+    assert nxt is not None and nxt is not task
+    assert nxt.due_date == date.today() + timedelta(days=days)
+    assert (nxt.title, nxt.duration_minutes, nxt.priority, nxt.frequency, nxt.preferred_time) == (
+        "Walk", 30, "high", frequency, time(8)
+    )
+    assert nxt.last_completed is None
+    assert nxt.pet is pet and nxt in pet.tasks and len(pet.tasks) == 2
+    assert task.next_occurrence is nxt
+
+
+def test_next_occurrence_not_due_until_its_date():
+    pet = make_pet()
+    task = make_task()
+    pet.add_task(task)
+    nxt = task.mark_complete()
+    assert not task.is_due_today()  # the completed one is finished
+    assert not nxt.is_due_today()  # the new one waits for tomorrow
+    nxt.due_date = date.today()
+    assert nxt.is_due_today()
+
+
+def test_mark_complete_twice_creates_only_one_successor():
+    pet = make_pet()
+    task = make_task()
+    pet.add_task(task)
+    first = task.mark_complete()
+    assert task.mark_complete() is first
+    assert len(pet.tasks) == 2
+
+
+def test_mark_complete_without_pet_creates_nothing():
+    assert make_task().mark_complete() is None
+
+
+def test_plan_skips_future_occurrence_with_due_date_reason():
+    owner = make_owner()
+    pet = make_pet()
+    owner.add_pet(pet)
+    task = make_task("Walk")
+    pet.add_task(task)
+    task.mark_complete()
+    plan = Scheduler(owner).generate_plan()
+    assert plan.scheduled_tasks == []
+    reasons = [r for _t, r in plan.skipped_tasks]
+    assert any(r.startswith(f"Not due until {(date.today() + timedelta(days=1)).isoformat()}") for r in reasons)
+
+
 def test_priority_score():
     assert [make_task(priority=p).priority_score() for p in ("low", "medium", "high")] == [1, 2, 3]
 
@@ -162,6 +217,91 @@ def test_sort_tasks_priority_then_time_then_duration():
     high_none = make_task("high_none", "high")
     _, sched = build(tasks=[low, high_none, high_late, high_early])
     assert [t.title for t in sched.sort_tasks()] == ["high_early", "high_late", "high_none", "low"]
+
+
+def test_sort_by_time_orders_by_preferred_time_none_last():
+    none_a = make_task("none_a", "high")
+    late = make_task("late", "low", preferred=time(15))
+    early = make_task("early", "low", preferred=time(8, 30))
+    none_b = make_task("none_b", "low")
+    _, sched = build(tasks=[none_a, late, none_b, early])
+    assert [t.title for t in sched.sort_by_time()] == ["early", "late", "none_a", "none_b"]
+    # Also accepts an explicit list and leaves it unchanged
+    given = [late, early]
+    assert sched.sort_by_time(given) == [early, late]
+    assert given == [late, early]
+
+
+def test_filter_tasks_by_completion_and_pet():
+    owner = make_owner()
+    rex, mia = make_pet("Rex"), make_pet("Mia")
+    owner.add_pet(rex)
+    owner.add_pet(mia)
+    done = make_task("done")
+    done.mark_complete()
+    pending = make_task("pending")
+    mia_task = make_task("mia_task")
+    rex.add_task(done)
+    rex.add_task(pending)
+    mia.add_task(mia_task)
+    sched = Scheduler(owner)
+
+    assert sched.filter_tasks() == [done, pending, mia_task]  # no filters returns everything
+    assert sched.filter_tasks(completed=True) == [done]
+    assert sched.filter_tasks(completed=False) == [pending, mia_task]
+    assert sched.filter_tasks(pet_name="rex") == [done, pending]  # case-insensitive
+    assert sched.filter_tasks(completed=False, pet_name="Rex") == [pending]  # both filters combine
+    assert sched.filter_tasks(pet_name="Nobody") == []
+
+
+def test_find_conflicts_same_pet_different_pets_and_none():
+    owner = make_owner()
+    rex, mia = make_pet("Rex"), make_pet("Mia")
+    owner.add_pet(rex)
+    owner.add_pet(mia)
+    rex.add_task(make_task("Walk", duration=30, preferred=time(8, 0)))
+    rex.add_task(make_task("Brush", duration=10, preferred=time(8, 15)))  # overlaps Walk, same pet
+    mia.add_task(make_task("Meds", duration=5, preferred=time(8, 20)))  # overlaps Brush, other pet
+    mia.add_task(make_task("Play", duration=15, preferred=time(9, 0)))  # starts when Walk ends: fine
+    mia.add_task(make_task("Anytime"))  # no preferred time: never conflicts
+    warnings = Scheduler(owner).find_conflicts()
+    assert len(warnings) == 3
+    assert any(w.startswith("Conflict for Rex:") and "'Walk'" in w and "'Brush'" in w for w in warnings)
+    assert any("Rex's 'Brush' (08:15-08:25)" in w and "Mia's 'Meds' (08:20-08:25)" in w for w in warnings)
+    assert not any("'Play'" in w for w in warnings)
+
+
+def test_find_conflicts_exact_same_time_and_no_conflicts():
+    owner = make_owner()
+    rex = make_pet()
+    owner.add_pet(rex)
+    rex.add_task(make_task("A", preferred=time(7)))
+    rex.add_task(make_task("B", preferred=time(7)))
+    assert len(Scheduler(owner).find_conflicts()) == 1
+    assert Scheduler(make_owner()).find_conflicts() == []
+
+
+def test_find_conflicts_ignores_tasks_not_due_today():
+    owner = make_owner()
+    rex = make_pet()
+    owner.add_pet(rex)
+    done = make_task("A", preferred=time(7))
+    done.last_completed = date.today()
+    rex.add_task(done)
+    rex.add_task(make_task("B", preferred=time(7)))
+    assert Scheduler(owner).find_conflicts() == []
+
+
+def test_plan_carries_warnings_and_still_schedules_everything_it_can():
+    owner = make_owner()
+    rex = make_pet()
+    owner.add_pet(rex)
+    rex.add_task(make_task("A", duration=30, preferred=time(8)))
+    rex.add_task(make_task("B", duration=30, preferred=time(8)))
+    plan = Scheduler(owner).generate_plan()
+    assert len(plan.warnings) == 1
+    assert len(plan.scheduled_tasks) == 2  # one is moved, nothing crashes
+    assert "Warnings:" in plan.display()
 
 
 def test_generate_plan_uses_preferred_time():

@@ -87,14 +87,15 @@ Sample test output:
 
 ## 📐 Smarter Scheduling
 
-> Fill in once you've implemented scheduling logic.
-
-| Feature | Method(s) | Notes |
-|---------|-----------|-------|
-| Task sorting | | e.g., by priority, duration |
-| Filtering | | e.g., skip tasks if time runs out |
-| Conflict handling | | e.g., overlapping time slots |
-| Recurring tasks | | e.g., daily vs. weekly |
+| Feature           | Method                       | What it does                                                                           |
+|-------------------|------------------------------|----------------------------------------------------------------------------------------|
+| Task sorting      | `Scheduler.sort_tasks()`     | Priority (high first), then preferred time, then shortest. Used by the scheduler.      |
+| Task sorting      | `Scheduler.sort_by_time()`   | Preferred time only, earliest first. No-time tasks go last.                            |
+| Filtering         | `Scheduler.filter_tasks()`   | By completion status and/or pet name (case-insensitive).                               |
+| Filtering         | `Scheduler.generate_plan()`  | Skips tasks that are not due or don't fit, and records the reason.                     |
+| Conflict handling | `Scheduler.find_conflicts()` | Returns a warning for each overlapping pair of preferred times. Never raises an error. |
+| Recurring tasks   | `Task.mark_complete()`       | Creates the next copy: today + 1 day (daily) or + 7 days (weekly), using `timedelta`.  |
+| Recurring tasks   | `Task.is_due_today()`        | Keeps the new copy unscheduled until its due date.                                     |
 
 ## 📸 Demo Walkthrough
 

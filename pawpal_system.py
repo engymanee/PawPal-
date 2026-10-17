@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, time
+from datetime import date, time, timedelta
+from itertools import islice
 from typing import Dict, List, Literal, Optional, Tuple
 
 
@@ -19,6 +20,38 @@ def _to_minutes(t: time) -> int:
 def _to_time(minutes: int) -> time:
     """Convert minutes since midnight back to a time of day."""
     return time(minutes // 60, minutes % 60)
+
+
+def _clock(minutes: int) -> str:
+    """Format minutes since midnight as an "HH:MM" string.
+
+    Values of 1440 or more wrap past midnight, so 1470 becomes "00:30".
+    """
+    return f"{minutes // 60 % 24:02d}:{minutes % 60:02d}"
+
+
+def _conflict_message(first: Tuple[int, int, Task], second: Tuple[int, int, Task]) -> str:
+    """Build one warning line for two overlapping tasks.
+
+    Args:
+        first, second: (start, end, task) tuples, with start and end in minutes since midnight.
+
+    Returns:
+        "Conflict for <pet>: ..." when both tasks belong to the same pet, otherwise
+        "Conflict: <pet>'s ... overlaps <pet>'s ..." with each task's title and HH:MM-HH:MM span.
+    """
+    (_, _, a), (_, _, b) = first, second
+
+    def describe(span: Tuple[int, int, Task], with_pet: bool) -> str:
+        start, end, task = span
+        owner = ""
+        if with_pet and task.pet:
+            owner = f"{task.pet.name}' " if task.pet.name.endswith("s") else f"{task.pet.name}'s "
+        return f"{owner}'{task.title}' ({_clock(start)}-{_clock(end)})"
+
+    if a.pet is not None and a.pet is b.pet:
+        return f"Conflict for {a.pet.name}: {describe(first, False)} overlaps {describe(second, False)}"
+    return f"Conflict: {describe(first, True)} overlaps {describe(second, True)}"
 
 
 @dataclass
@@ -46,17 +79,62 @@ class Task:
     frequency: Literal["daily", "weekly"]
     preferred_time: Optional[time] = None
     last_completed: Optional[date] = None
+    # Set on auto-created recurring instances: the task is not due before this date.
+    due_date: Optional[date] = None
+    # The recurring instance created when this task was completed; excluded from repr/eq.
+    next_occurrence: Optional[Task] = field(default=None, repr=False, compare=False)
     # Back-reference set by Pet.add_task; excluded from repr/eq to avoid cycles.
     pet: Optional[Pet] = field(default=None, repr=False, compare=False)
 
-    def mark_complete(self) -> None:
-        """Mark this task as completed."""
-        # IMPLEMENT: record today as the last completion date
-        self.last_completed = date.today()
+    def mark_complete(self) -> Optional[Task]:
+        """Mark this task as completed and create the next occurrence of a recurring task.
+
+        Sets last_completed to today. If the task belongs to a pet, a copy is added to that pet
+        with due_date = today + timedelta(days=1) for daily tasks or timedelta(days=7) for weekly
+        ones. Only one copy is ever created: completing the task again returns the existing one.
+
+        Returns:
+            The new (or existing) next occurrence, or None if the task has no pet to attach it to.
+        """
+        # Record today as the last completion date
+        today = date.today()
+        self.last_completed = today
+
+        # Only one successor per task, and only if there is a pet to attach it to
+        if self.next_occurrence is not None:
+            return self.next_occurrence
+        if self.pet is None:
+            return None
+
+        # Daily tasks come back tomorrow, weekly tasks in 7 days
+        days = 1 if self.frequency == "daily" else 7
+        successor = Task(
+            title=self.title,
+            category=self.category,
+            duration_minutes=self.duration_minutes,
+            priority=self.priority,
+            frequency=self.frequency,
+            preferred_time=self.preferred_time,
+            due_date=today + timedelta(days=days),
+        )
+        self.pet.add_task(successor)
+        self.next_occurrence = successor
+        return successor
 
     def is_due_today(self) -> bool:
-        """Return True if the task's frequency makes it due today."""
-        # IMPLEMENT: never completed means due; otherwise compare days since last completion
+        """Return True if the task is due today.
+
+        A task is not due if it already has a next occurrence, or if its due_date is in the
+        future. Otherwise it is due when it has never been completed, or when enough days have
+        passed since last_completed (1 for daily tasks, 7 for weekly ones).
+        """
+        # A task that already has a successor is finished; the successor carries the schedule
+        if self.next_occurrence is not None:
+            return False
+        # Recurring instances wait for their due date
+        if self.due_date is not None and self.due_date > date.today():
+            return False
+        # Never completed means due; otherwise compare days since last completion
         if self.last_completed is None:
             return True
         days_since = (date.today() - self.last_completed).days
@@ -167,6 +245,7 @@ class DailyPlan:
     scheduled_tasks: List[Tuple[Task, time, str]] = field(default_factory=list)
     skipped_tasks: List[Tuple[Task, str]] = field(default_factory=list)
     total_minutes_used: int = 0
+    warnings: List[str] = field(default_factory=list)
 
     def add_scheduled(self, task: Task, start: time, reason: str) -> None:
         """Record a task scheduled at a start time, with the reason it was chosen."""
@@ -226,6 +305,12 @@ class DailyPlan:
                 pet_name = task.pet.name if task.pet else "Unassigned"
                 lines.append(f"  {pet_name}: {task.title} - {reason}")
 
+        # Show any conflict warnings last
+        if self.warnings:
+            lines.append("Warnings:")
+            for warning in self.warnings:
+                lines.append(f"  {warning}")
+
         return "\n".join(lines)
 
     def summary(self) -> str:
@@ -247,6 +332,7 @@ class Scheduler:
         """Build a DailyPlan from the owner's tasks and time windows, store it in self.plan, and return it."""
         # IMPLEMENT: walk the sorted tasks, place each one in a window, record why
         plan = DailyPlan(owner=self.owner, plan_date=date.today())
+        plan.warnings = self.find_conflicts()
         remaining = self.owner.available_minutes
 
         # Set up the windows (default window if the owner gave none); cursor = next free minute in each
@@ -257,7 +343,13 @@ class Scheduler:
         for task in self.sort_tasks():
             # Skip tasks that are not due today
             if not task.is_due_today():
-                plan.add_skipped(task, f"Not due today ({task.frequency} task, done {task.last_completed})")
+                if task.due_date is not None and task.due_date > date.today():
+                    reason = f"Not due until {task.due_date.isoformat()} ({task.frequency} task)"
+                elif task.last_completed is None:
+                    reason = f"Not due today ({task.frequency} task)"
+                else:
+                    reason = f"Not due today ({task.frequency} task, done {task.last_completed})"
+                plan.add_skipped(task, reason)
                 continue
 
             # Skip tasks that don't fit in the owner's remaining minutes
@@ -314,6 +406,89 @@ class Scheduler:
             return (-task.priority_score(), not has_time, minutes, task.duration_minutes)
 
         return sorted(self.owner.get_all_tasks(), key=sort_key)
+
+    def sort_by_time(self, tasks: Optional[List[Task]] = None) -> List[Task]:
+        """Return tasks ordered by preferred time, earliest first.
+
+        Tasks without a preferred time go last, and tasks with the same time keep their
+        original order. The input list is not changed.
+
+        Args:
+            tasks: The tasks to sort. Defaults to all of the owner's tasks.
+
+        Returns:
+            A new sorted list of tasks.
+        """
+        # Defaults to all of the owner's tasks; sorted() is stable so equal times keep their order
+        if tasks is None:
+            tasks = self.owner.get_all_tasks()
+        return sorted(
+            tasks,
+            key=lambda t: (t.preferred_time is None, _to_minutes(t.preferred_time) if t.preferred_time else 0),
+        )
+
+    def find_conflicts(self, tasks: Optional[List[Task]] = None) -> List[str]:
+        """Return a warning message for each pair of tasks whose preferred times overlap.
+
+        Each task occupies the range from its preferred time to that time plus its duration.
+        Two tasks conflict if their ranges overlap, whether they are for the same pet or
+        different pets. A task that starts exactly when another ends is not a conflict, and
+        tasks without a preferred time are ignored. This only reports problems and never
+        raises an error. Tasks are sorted by start time, so each one is compared only with
+        the tasks that start before it ends.
+
+        Args:
+            tasks: The tasks to check. Defaults to the owner's tasks that are due today.
+
+        Returns:
+            A list of warning strings, empty if there are no conflicts.
+        """
+        # Lightweight check: only reports, never raises. Same pet or different pets both count,
+        # since one owner can't do two things at once. Defaults to tasks due today.
+        if tasks is None:
+            tasks = [t for t in self.owner.get_all_tasks() if t.is_due_today()]
+
+        # (start, end, task) in minutes, computed once, earliest start first
+        spans = []
+        for t in tasks:
+            if t.preferred_time is not None:
+                start = _to_minutes(t.preferred_time)
+                spans.append((start, start + t.duration_minutes, t))
+        spans.sort(key=lambda span: span[0])
+
+        warnings = []
+        for i, first in enumerate(spans):
+            for second in islice(spans, i + 1, None):
+                if second[0] >= first[1]:
+                    break  # sorted by start, so nothing later can overlap first either
+                warnings.append(_conflict_message(first, second))
+        return warnings
+
+    def filter_tasks(
+        self, completed: Optional[bool] = None, pet_name: Optional[str] = None
+    ) -> List[Task]:
+        """Return the owner's tasks that match the given filters.
+
+        A task counts as completed if it has been completed and is not due again yet.
+        Filters left as None are not applied, and when both are given a task must match both.
+
+        Args:
+            completed: True for completed tasks, False for the rest, None for either.
+            pet_name: Only tasks for the pet with this name. The match ignores case.
+
+        Returns:
+            A list of matching tasks in the owner's original order.
+        """
+        # A task counts as completed when it has been done and is not due again yet
+        # None means "don't filter on this"; pet names match ignoring case
+        tasks = self.owner.get_all_tasks()
+        if completed is not None:
+            tasks = [
+                t for t in tasks if (t.last_completed is not None and not t.is_due_today()) == completed
+            ]
+        if pet_name is not None:
+            tasks = [t for t in tasks if t.pet and t.pet.name.lower() == pet_name.strip().lower()]
+        return tasks
 
     def fits_in_time(self, task: Task, remaining_minutes: int) -> bool:
         """Return True if the task fits in the remaining minutes."""
