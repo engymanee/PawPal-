@@ -71,18 +71,46 @@ Scheduled:
 
 ## 🧪 Testing PawPal+
 
+The tests live in `tests/test_pawpal.py` and cover the logic in `pawpal_system.py`. The Streamlit UI is not tested automatically.
+
 ```bash
 # Run the full test suite:
-pytest
+python -m pytest
 
-# Run with coverage:
-pytest --cov
+# Verbose, one line per test:
+python -m pytest -v
+
+# Run a single test, or every test whose name matches a keyword:
+python -m pytest tests/test_pawpal.py::test_find_conflicts_exact_same_time_and_no_conflicts
+python -m pytest -k "conflict"
 ```
+
+### What the tests verify
+
+| Area                   | What is checked                                                                                                                                          |
+|------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Sorting correctness    | `sort_by_time()` returns tasks in chronological order across pets, puts tasks with no time last, keeps the original order for equal times, and handles empty input. `sort_tasks()` orders by priority, then time, then duration. |
+| Recurrence logic       | Completing a daily task creates one new copy due tomorrow (weekly: in 7 days) on the same pet. The copy is skipped in today's plan and becomes due on its due date. Completing a task repeatedly never creates extra copies. |
+| Conflict detection     | `find_conflicts()` flags tasks at the same time, for one pet or for different pets, and reports every pair when three or more collide. Back-to-back tasks and tasks without a time are not flagged. Warnings appear on the plan without stopping it from scheduling. |
+| Plan generation        | Preferred times are used when free. Tasks are skipped, with a reason, when they are not due, when the owner is out of minutes, or when no time window has room. Scheduled tasks never overlap. |
+| Models and filtering   | Pet/task and owner/pet links stay in sync, duplicates are ignored, errors are raised for tasks or pets that don't belong, and `filter_tasks()` filters by completion and pet name. |
+
+A fuller list of planned cases and known gaps is in [TEST_PLAN.md](TEST_PLAN.md).
+
+### Confidence level: ★★★★☆ (4 of 5)
+
+All 43 tests pass, and they cover the behaviors that matter most: sorting, recurring tasks, conflict detection, and plan generation with skip reasons. I'm confident the core scheduling logic works as described.
+It is not 5 stars because some edge cases are not tested yet
 
 Sample test output:
 
 ```
-# Paste your pytest output here
+============================= test session starts ==============================
+collected 43 items
+
+tests/test_pawpal.py ...........................................        [100%]
+
+============================== 43 passed in 0.02s ==============================
 ```
 
 ## 📐 Smarter Scheduling

@@ -372,3 +372,149 @@ def test_task_addition_increases_pet_task_count():
     assert len(pet.tasks) == 1
     pet.add_task(make_task("Feed"))
     assert len(pet.tasks) == 2
+
+
+# ---- Sorting correctness: chronological order ----
+
+def test_sort_by_time_is_chronological_across_pets_and_input_order():
+    owner = make_owner()
+    rex, mia = make_pet("Rex"), make_pet("Mia")
+    owner.add_pet(rex)
+    owner.add_pet(mia)
+    evening = make_task("evening", preferred=time(18, 45))
+    midnight = make_task("midnight", preferred=time(0, 0))  # falsy-looking value must still sort first
+    noon = make_task("noon", preferred=time(12, 0))
+    morning = make_task("morning", preferred=time(7, 5))
+    rex.add_task(evening)
+    mia.add_task(noon)
+    rex.add_task(midnight)
+    mia.add_task(morning)
+
+    ordered = Scheduler(owner).sort_by_time()
+
+    assert [t.title for t in ordered] == ["midnight", "morning", "noon", "evening"]
+    times = [t.preferred_time for t in ordered]
+    assert times == sorted(times)
+
+
+def test_sort_by_time_keeps_original_order_for_equal_times():
+    first = make_task("first", preferred=time(9, 0))
+    second = make_task("second", preferred=time(9, 0))
+    third = make_task("third", preferred=time(9, 0))
+    _, sched = build(tasks=[first, second, third])
+    assert sched.sort_by_time() == [first, second, third]
+
+
+def test_sort_by_time_handles_empty_owner_and_empty_list():
+    sched = Scheduler(make_owner())
+    assert sched.sort_by_time() == []
+    assert sched.sort_by_time([]) == []
+
+
+# ---- Recurrence logic: completing a daily task creates tomorrow's task ----
+
+def test_completing_daily_task_creates_task_for_following_day():
+    pet = make_pet()
+    task = make_task("Feed", "high", 10, "daily", preferred=time(7, 30))
+    pet.add_task(task)
+
+    new_task = task.mark_complete()
+
+    assert new_task is not None and new_task is not task
+    assert new_task.due_date == date.today() + timedelta(days=1)
+    assert new_task in pet.tasks and len(pet.tasks) == 2
+    assert new_task.last_completed is None
+    assert (new_task.title, new_task.priority, new_task.preferred_time) == ("Feed", "high", time(7, 30))
+
+
+def test_daily_recurrence_via_plan_appears_tomorrow_not_today():
+    owner, sched = build(tasks=[make_task("Feed", duration=10)])
+    feed = owner.get_all_tasks()[0]
+    plan = sched.generate_plan()
+    plan.complete_task(feed)
+    new_task = feed.next_occurrence
+
+    # Today: the new task is skipped, with its due date as the reason.
+    todays = sched.generate_plan()
+    assert [t for t, *_ in todays.scheduled_tasks] == []
+    assert new_task in [t for t, _ in todays.skipped_tasks]
+    assert (date.today() + timedelta(days=1)).isoformat() in todays.get_reason(new_task)
+
+    # Tomorrow: once its due date arrives, it is due again.
+    new_task.due_date = date.today()
+    assert new_task.is_due_today()
+    assert new_task in [t for t, *_ in sched.generate_plan().scheduled_tasks]
+
+
+def test_daily_recurrence_does_not_pile_up_on_repeat_completion():
+    pet = make_pet()
+    task = make_task()
+    pet.add_task(task)
+    task.mark_complete()
+    task.mark_complete()
+    task.mark_complete()
+    assert len(pet.tasks) == 2  # original plus exactly one successor
+
+
+# ---- Conflict detection: duplicate times are flagged ----
+
+def test_scheduler_flags_two_tasks_at_the_same_time_for_one_pet():
+    owner = make_owner()
+    rex = make_pet("Rex")
+    owner.add_pet(rex)
+    rex.add_task(make_task("Walk", duration=30, preferred=time(8, 0)))
+    rex.add_task(make_task("Feed", duration=10, preferred=time(8, 0)))
+
+    warnings = Scheduler(owner).find_conflicts()
+
+    assert len(warnings) == 1
+    assert warnings[0].startswith("Conflict for Rex:")
+    assert "'Walk'" in warnings[0] and "'Feed'" in warnings[0]
+    assert "08:00" in warnings[0]
+
+
+def test_scheduler_flags_same_time_across_different_pets():
+    owner = make_owner()
+    rex, mia = make_pet("Rex"), make_pet("Mia")
+    owner.add_pet(rex)
+    owner.add_pet(mia)
+    rex.add_task(make_task("Walk", preferred=time(17, 0)))
+    mia.add_task(make_task("Meds", preferred=time(17, 0)))
+
+    warnings = Scheduler(owner).find_conflicts()
+
+    assert len(warnings) == 1
+    assert "Rex's 'Walk'" in warnings[0] and "Mia's 'Meds'" in warnings[0]
+
+
+def test_three_tasks_at_the_same_time_report_every_pair():
+    owner = make_owner()
+    rex = make_pet()
+    owner.add_pet(rex)
+    for name in ("A", "B", "C"):
+        rex.add_task(make_task(name, preferred=time(10, 0)))
+    assert len(Scheduler(owner).find_conflicts()) == 3  # A-B, A-C, B-C
+
+
+def test_different_times_are_not_flagged():
+    owner = make_owner()
+    rex = make_pet()
+    owner.add_pet(rex)
+    rex.add_task(make_task("A", duration=30, preferred=time(8, 0)))
+    rex.add_task(make_task("B", duration=30, preferred=time(8, 30)))  # starts as A ends
+    rex.add_task(make_task("C", duration=30, preferred=time(14, 0)))
+    assert Scheduler(owner).find_conflicts() == []
+
+
+def test_duplicate_time_warning_reaches_the_plan_without_crashing():
+    owner = make_owner()
+    rex = make_pet()
+    owner.add_pet(rex)
+    rex.add_task(make_task("A", preferred=time(9, 0)))
+    rex.add_task(make_task("B", preferred=time(9, 0)))
+
+    plan = Scheduler(owner).generate_plan()
+
+    assert len(plan.warnings) == 1
+    starts = [start for _, start, _ in plan.scheduled_tasks]
+    assert len(starts) == 2 and len(set(starts)) == 2  # both scheduled, at different times
