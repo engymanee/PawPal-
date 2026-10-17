@@ -1,15 +1,65 @@
 classDiagram
-    %% Replace the placeholders below with your actual classes, attributes, methods, and relationships.
-    %% Keep this file updated so it matches your final implementation.
-
-    class ClassName {
-        +type attribute
-        +method() returnType
+    class Owner {
+        +str name
+        +int available_minutes
+        +List~Tuple~ time_windows
+        +Dict preferences
+        +List~Pet~ pets
+        +add_pet(pet) void
+        +remove_pet(pet) void
+        +set_availability(minutes, windows) void
+        +set_preference(key, value) void
+        +get_all_tasks() List~Task~
     }
 
-    class AnotherClass {
-        +type attribute
-        +method() returnType
+    class Pet {
+        +str name
+        +str species
+        +str breed
+        +int age
+        +str special_needs
+        +List~Task~ tasks
+        +add_task(task) void
+        +remove_task(task) void
+        +edit_task(task, ...) void
+        +get_tasks() List~Task~
     }
 
-    ClassName --> AnotherClass : relationship
+    class Task {
+        +str title
+        +str category
+        +int duration_minutes
+        +str priority
+        +str frequency
+        +str preferred_time
+        +bool is_completed
+        +mark_complete() void
+        +is_due_today() bool
+        +priority_score() int
+    }
+
+    class Scheduler {
+        +Owner owner
+        +generate_plan() DailyPlan
+        +sort_tasks() List~Task~
+        +fits_in_time(task, remaining_minutes) bool
+        +explain_choice(task, reason) str
+    }
+
+    class DailyPlan {
+        +date date
+        +List~Tuple~ scheduled_tasks
+        +List~Tuple~ skipped_tasks
+        +int total_minutes_used
+        +add_scheduled(task, time, reason) void
+        +add_skipped(task, reason) void
+        +display() str
+        +summary() str
+    }
+
+    Owner "1" o-- "0..*" Pet : owns
+    Pet "1" *-- "0..*" Task : has
+    Scheduler --> Owner : uses
+    Scheduler ..> Task : sorts / schedules
+    Scheduler ..> DailyPlan : creates
+    DailyPlan o-- "0..*" Task : scheduled / skipped

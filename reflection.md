@@ -5,6 +5,12 @@
 **a. Initial design**
 
 - Briefly describe your initial UML design.
+  1. **Add a pet profile.** Enter the pet’s name, species or breed, age and any special needs, such as medication or a diet.
+  2. **Add, edit or remove care tasks.** Create a task like “Morning walk” with a duration, a priority (high, medium or low), a frequency (daily or weekly) and an optional preferred time.
+  3. **Set daily constraints and preferences.** Tell the app how much time is available today, which time windows work (for example, “free 7–8am and 6–9pm”), and preferences such as “walks before work” or “no grooming on weekdays”.
+  4. **Generate a daily plan.** The app schedules tasks into the available time, puts high-priority ones like meds and feeding first, and skips or postpones whatever doesn’t fit.
+  5. **See why the plan looks the way it does, then mark tasks done.** Each scheduled or skipped task comes with a reason, like “Meds scheduled first: high priority, fixed time” or “Grooming skipped: not enough time today”. The owner can then check tasks off as they complete them.
+
 - What classes did you include, and what responsibilities did you assign to each?
 
 **b. Design changes**
