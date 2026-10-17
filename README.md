@@ -42,16 +42,31 @@ pip install -r requirements.txt
 6. Connect your logic to the Streamlit UI in `app.py`.
 7. Refine UML so it matches what you actually built.
 
+## 🛠️ Implementation Summary
+
+The logic lives in `pawpal_system.py`:
+
+- **Owner** has pets and the time they have available each day.
+- **Pet** has care tasks (walks, feeding, meds, etc.).
+- **Task** has a duration, priority, frequency, and an optional preferred time.
+- **Scheduler** sorts the owner's tasks by priority, skips tasks that aren't due or don't fit, and places the rest in the owner's time windows.
+- **DailyPlan** holds the result: scheduled tasks, skipped tasks, and a reason for each.
+
 ## 🖥️ Sample Output
 
-Paste a sample of your app's CLI or Streamlit output here so a reader can see what a generated plan looks like:
-
-```
-# e.g.:
-# Daily plan for Biscuit (Golden Retriever):
-#   08:00 — Morning walk (30 min) [priority: high]
-#   09:00 — Feeding (10 min) [priority: high]
-#   ...
+========================================
+Today's Schedule
+========================================
+Plan for Jordan on 2026-10-17
+Scheduled:
+  Buddy:
+    07:30 - Morning walk (30 min) - High priority, scheduled at preferred time 07:30
+    17:30 - Evening feeding (10 min) - Medium priority, scheduled at preferred time 17:30
+  Whiskers:
+    08:00 - Thyroid medication (5 min) - High priority, scheduled at preferred time 08:00
+    18:00 - Laser pointer play (15 min) - Low priority, scheduled at preferred time 18:00
+----------------------------------------
+4 scheduled, 0 skipped, 60 of 120 minutes used
 ```
 
 ## 🧪 Testing PawPal+

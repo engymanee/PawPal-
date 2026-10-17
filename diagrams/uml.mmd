@@ -2,7 +2,7 @@ classDiagram
     class Owner {
         +str name
         +int available_minutes
-        +List~Tuple~ time_windows
+        +List~TimeWindow~ time_windows
         +Dict preferences
         +List~Pet~ pets
         +add_pet(pet) void
@@ -19,47 +19,67 @@ classDiagram
         +int age
         +str special_needs
         +List~Task~ tasks
+        +Optional~Owner~ owner
         +add_task(task) void
         +remove_task(task) void
-        +edit_task(task, ...) void
+        +edit_task(task, **changes) void
         +get_tasks() List~Task~
     }
 
     class Task {
         +str title
-        +str category
+        +Literal category
         +int duration_minutes
-        +str priority
-        +str frequency
-        +str preferred_time
-        +bool is_completed
+        +Literal priority
+        +Literal frequency
+        +Optional~time~ preferred_time
+        +Optional~date~ last_completed
+        +Optional~Pet~ pet
         +mark_complete() void
         +is_due_today() bool
         +priority_score() int
     }
 
+    class TimeWindow {
+        +time start
+        +time end
+        +duration_minutes() int
+        +contains(t) bool
+    }
+
     class Scheduler {
         +Owner owner
+        +Optional~DailyPlan~ plan
+        +__init__(owner) void
         +generate_plan() DailyPlan
         +sort_tasks() List~Task~
         +fits_in_time(task, remaining_minutes) bool
-        +explain_choice(task, reason) str
+        +explain_choice(task) str
     }
 
     class DailyPlan {
-        +date date
-        +List~Tuple~ scheduled_tasks
-        +List~Tuple~ skipped_tasks
+        +Owner owner
+        +date plan_date
+        +List~Tuple~Task, time, str~~ scheduled_tasks
+        +List~Tuple~Task, str~~ skipped_tasks
         +int total_minutes_used
-        +add_scheduled(task, time, reason) void
+        +add_scheduled(task, start, reason) void
         +add_skipped(task, reason) void
+        +get_reason(task) str
+        +complete_task(task) void
         +display() str
         +summary() str
     }
 
     Owner "1" o-- "0..*" Pet : owns
+    Owner "1" *-- "0..*" TimeWindow : available during
     Pet "1" *-- "0..*" Task : has
+    Task "0..*" --> "0..1" Pet : belongs to
+    Pet "0..*" --> "0..1" Owner : owned by
     Scheduler --> Owner : uses
+    Scheduler --> "0..1" DailyPlan : holds latest
     Scheduler ..> Task : sorts / schedules
     Scheduler ..> DailyPlan : creates
+    DailyPlan --> Owner : planned for
     DailyPlan o-- "0..*" Task : scheduled / skipped
+    DailyPlan ..> Task : complete_task calls mark_complete

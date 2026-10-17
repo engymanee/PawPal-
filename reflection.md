@@ -13,10 +13,30 @@
 
 - What classes did you include, and what responsibilities did you assign to each?
 
+  1. **Task** represents one pet care activity, such as a walk, a feeding or a dose of medication. It stores the title, category, duration, priority, frequency and an optional preferred time. It can mark itself complete, report whether it’s due today, and turn its priority into a number for sorting.
+  2. **Pet** stores a pet’s basic profile (name, species, breed, age and any special needs) and owns that pet’s list of tasks. It handles adding, editing, removing and returning those tasks.
+  3. **Owner** represents the person using the app. It holds their pets, the minutes they have available each day, their available time windows and their scheduling preferences. It can also collect every task across all of their pets, so the scheduler has one place to get them from.
+  4. **Scheduler** is the decision-making part of the system. It takes an Owner, sorts the tasks by priority and preferred time, checks whether each one fits in the remaining time, and records why it scheduled or skipped each task. Its main method, `generate_plan()`, returns a DailyPlan.
+  5. **DailyPlan** holds the result: the date, the scheduled tasks with their start times and reasons, the skipped tasks with their reasons, and the total minutes used. It can display the full plan or give a short summary.
+
 **b. Design changes**
 
 - Did your design change during implementation?
+Yes, I did
+
 - If yes, describe at least one change and why you made it.
+1. Before, category, priority and frequency were plain str fields, so any text was accepted. I changed them to Literal types, which list the exact values each field is allowed to have. After implementing that I noticed that Literal was never imported so I imported it.
+2. I added a `pet` field to Task so each task knows which pet it belongs to.
+3. I added an `owner` field to Pet so each pet knows who owns it.
+4. I created a new TimeWindow class, and Owner now uses it instead of plain (start, end) pairs.
+5. I added an `owner` field to DailyPlan so a plan knows who it is for.
+6. I renamed DailyPlan's `date` field to `plan_date` because it clashed with the `date` type.
+7. I added `get_reason(task)` to DailyPlan to look up why a task was scheduled or skipped.
+8. I added `complete_task(task)` to DailyPlan so finishing a task is connected to the plan.
+9. I gave Scheduler a `plan` attribute that remembers the latest plan it generated.
+10. I changed `explain_choice` to take only `task` and read the reason from the saved plan.
+11. I added `from __future__ import annotations` so classes can refer to ones defined later in the file.
+12. I updated the UML diagram to match all of these changes.
 
 ---
 
@@ -39,12 +59,18 @@
 **a. How you used AI**
 
 - How did you use AI tools during this project (for example: design brainstorming, debugging, refactoring)?
+  I used Claude Code throughout the project. I used it for design brainstorming, to turn my UML diagram into a Python class skeleton, and to fill in the method logic step by step. I also used it to review the design as I went, which is how I caught missing pieces like the `Literal` import and the back-references between Task, Pet and Owner. Near the end I used it for the small cleanup jobs: adding one-line docstrings and writing the README implementation summary.
+
 - What kinds of prompts or questions were most helpful?
+  The most helpful prompts were small and specific, such as "add 1-line docstrings to the methods in pawpal_system.py" or "write a short summary of how the classes work together". They gave me a result I could check quickly. Prompts that pointed the AI at my existing UML and files worked better than open-ended ones, because the answers matched my design instead of inventing a new one. Asking it to explain why a design choice was made was also useful, because I learned something and could decide whether I agreed.
 
 **b. Judgment and verification**
 
 - Describe one moment where you did not accept an AI suggestion as-is.
+  When the AI turned my UML into a class skeleton, I did not accept it as written. The skeleton used a `date` field on DailyPlan, which clashed with the `date` type imported from `datetime`, so I renamed it to `plan_date`. I also noticed that the `Literal` types for category, priority and frequency were used but never imported, so I added the import myself.
+
 - How did you evaluate or verify what the AI suggested?
+  I read the generated code against my UML diagram and checked each field and method one by one. I ran the code to catch errors like the missing import, and I updated the UML to match what the code actually does. I also wrote tests in `tests/` for the main scheduling behaviors instead of trusting that the logic worked.
 
 ---
 
